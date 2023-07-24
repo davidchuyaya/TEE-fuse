@@ -47,6 +47,23 @@
 #endif
 #include <sys/file.h> /* flock(2) */
 
+/* Operations that would've been passed through to Linux root instead occur in the specified directory. */
+const char* mount_point = "/home/davidchuyaya/hellotest/";
+const size_t mount_point_len = 29; // Remember to keep in sync with mount_point.
+
+/* Deletes the first character of "path" (assumed to be "/") and prepends mount_point. */
+static char* prepend_path(const char* path)
+{
+	size_t path_len = strlen(path);
+	// if (path_len <= 0)
+	// 	return mount_point;
+	char* new_path = malloc(mount_point_len + path_len);
+	strcpy(new_path, mount_point);
+	strcat(new_path, path+1);
+	printf("New path: %s\n", new_path);
+	return new_path;
+}
+
 static void *xmp_init(struct fuse_conn_info *conn,
 		      struct fuse_config *cfg)
 {
@@ -77,8 +94,11 @@ static int xmp_getattr(const char *path, struct stat *stbuf,
 
 	if(fi)
 		res = fstat(fi->fh, stbuf);
-	else
-		res = lstat(path, stbuf);
+	else {
+		char* new_path = prepend_path(path);
+		res = lstat(new_path, stbuf);
+		free(new_path);
+	}
 	if (res == -1)
 		return -errno;
 
@@ -89,7 +109,9 @@ static int xmp_access(const char *path, int mask)
 {
 	int res;
 
-	res = access(path, mask);
+	char* new_path = prepend_path(path);
+	res = access(new_path, mask);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -100,7 +122,9 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
 
-	res = readlink(path, buf, size - 1);
+	char* new_path = prepend_path(path);
+	res = readlink(new_path, buf, size - 1);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -121,7 +145,9 @@ static int xmp_opendir(const char *path, struct fuse_file_info *fi)
 	if (d == NULL)
 		return -ENOMEM;
 
-	d->dp = opendir(path);
+	char* new_path = prepend_path(path);
+	d->dp = opendir(new_path);
+	free(new_path);
 	if (d->dp == NULL) {
 		res = -errno;
 		free(d);
@@ -213,10 +239,12 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int res;
 
+	char* new_path = prepend_path(path);
 	if (S_ISFIFO(mode))
-		res = mkfifo(path, mode);
+		res = mkfifo(new_path, mode);
 	else
-		res = mknod(path, mode, rdev);
+		res = mknod(new_path, mode, rdev);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -227,7 +255,9 @@ static int xmp_mkdir(const char *path, mode_t mode)
 {
 	int res;
 
-	res = mkdir(path, mode);
+	char* new_path = prepend_path(path);
+	res = mkdir(new_path, mode);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -238,7 +268,9 @@ static int xmp_unlink(const char *path)
 {
 	int res;
 
-	res = unlink(path);
+	char* new_path = prepend_path(path);
+	res = unlink(new_path);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -249,7 +281,9 @@ static int xmp_rmdir(const char *path)
 {
 	int res;
 
-	res = rmdir(path);
+	char* new_path = prepend_path(path);
+	res = rmdir(new_path);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -260,7 +294,10 @@ static int xmp_symlink(const char *from, const char *to)
 {
 	int res;
 
-	res = symlink(from, to);
+	/* symlink only requires "to" to be remapped, as seen here: https://github.com/libfuse/python-fuse/blob/master/example/xmp.py#L83 */
+	char* new_to = prepend_path(to);
+	res = symlink(from, new_to);
+	free(new_to);
 	if (res == -1)
 		return -errno;
 
@@ -275,7 +312,11 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 	if (flags)
 		return -EINVAL;
 
-	res = rename(from, to);
+	char* new_from = prepend_path(from);
+	char* new_to = prepend_path(to);
+	res = rename(new_from, new_to);
+	free(new_from);
+	free(new_to);
 	if (res == -1)
 		return -errno;
 
@@ -286,7 +327,11 @@ static int xmp_link(const char *from, const char *to)
 {
 	int res;
 
-	res = link(from, to);
+	char* new_from = prepend_path(from);
+	char* new_to = prepend_path(to);
+	res = link(new_from, new_to);
+	free(new_from);
+	free(new_to);
 	if (res == -1)
 		return -errno;
 
@@ -300,8 +345,11 @@ static int xmp_chmod(const char *path, mode_t mode,
 
 	if(fi)
 		res = fchmod(fi->fh, mode);
-	else
-		res = chmod(path, mode);
+	else {
+		char* new_path = prepend_path(path);
+		res = chmod(new_path, mode);
+		free(new_path);
+	}
 	if (res == -1)
 		return -errno;
 
@@ -315,8 +363,11 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 
 	if (fi)
 		res = fchown(fi->fh, uid, gid);
-	else
-		res = lchown(path, uid, gid);
+	else {
+		char* new_path = prepend_path(path);
+		res = lchown(new_path, uid, gid);
+		free(new_path);
+	}
 	if (res == -1)
 		return -errno;
 
@@ -330,8 +381,11 @@ static int xmp_truncate(const char *path, off_t size,
 
 	if(fi)
 		res = ftruncate(fi->fh, size);
-	else
-		res = truncate(path, size);
+	else {
+		char* new_path = prepend_path(path);
+		res = truncate(new_path, size);
+		free(new_path);
+	}
 
 	if (res == -1)
 		return -errno;
@@ -348,8 +402,11 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 	/* don't use utime/utimes since they follow symlinks */
 	if (fi)
 		res = futimens(fi->fh, ts);
-	else
-		res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
+	else {
+		char* new_path = prepend_path(path);
+		res = utimensat(0, new_path, ts, AT_SYMLINK_NOFOLLOW);
+		free(new_path);
+	}
 	if (res == -1)
 		return -errno;
 
@@ -361,7 +418,9 @@ static int xmp_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
 	int fd;
 
-	fd = open(path, fi->flags, mode);
+	char* new_path = prepend_path(path);
+	fd = open(new_path, fi->flags, mode);
+	free(new_path);
 	if (fd == -1)
 		return -errno;
 
@@ -373,7 +432,9 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
 	int fd;
 
-	fd = open(path, fi->flags);
+	char* new_path = prepend_path(path);
+	fd = open(new_path, fi->flags);
+	free(new_path);
 	if (fd == -1)
 		return -errno;
 
@@ -447,7 +508,9 @@ static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
 	int res;
 
+	char* new_path = prepend_path(path);
 	res = statvfs(path, stbuf);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 
@@ -517,7 +580,9 @@ static int xmp_fallocate(const char *path, int mode,
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
-	int res = lsetxattr(path, name, value, size, flags);
+	char* new_path = prepend_path(path);
+	int res = lsetxattr(new_path, name, value, size, flags);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -526,7 +591,9 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
-	int res = lgetxattr(path, name, value, size);
+	char* new_path = prepend_path(path);
+	int res = lgetxattr(new_path, name, value, size);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -534,7 +601,9 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
-	int res = llistxattr(path, list, size);
+	char* new_path = prepend_path(path);
+	int res = llistxattr(new_path, list, size);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -542,7 +611,9 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 
 static int xmp_removexattr(const char *path, const char *name)
 {
-	int res = lremovexattr(path, name);
+	char* new_path = prepend_path(path);
+	int res = lremovexattr(new_path, name);
+	free(new_path);
 	if (res == -1)
 		return -errno;
 	return 0;
