@@ -50,6 +50,7 @@
 /* Operations that would've been passed through to Linux root instead occur in the specified directory. */
 const char* mount_point = "/home/davidchuyaya/hellotest/";
 const size_t mount_point_len = 29; // Remember to keep in sync with mount_point.
+int write_count = 0;
 
 /* Deletes the first character of "path" (assumed to be "/") and prepends mount_point. */
 static char* prepend_path(const char* path)
@@ -60,7 +61,7 @@ static char* prepend_path(const char* path)
 	char* new_path = malloc(mount_point_len + path_len);
 	strcpy(new_path, mount_point);
 	strcat(new_path, path+1);
-	printf("New path: %s\n", new_path);
+	// printf("New path: %s\n", new_path);
 	return new_path;
 }
 
@@ -248,6 +249,9 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 	if (res == -1)
 		return -errno;
 
+	write_count++;
+	printf("Write count mknod: %d\n", write_count);
+
 	return 0;
 }
 
@@ -260,6 +264,9 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	free(new_path);
 	if (res == -1)
 		return -errno;
+	
+	write_count++;
+	printf("Write count mkdir: %d\n", write_count);
 
 	return 0;
 }
@@ -274,6 +281,9 @@ static int xmp_unlink(const char *path)
 	if (res == -1)
 		return -errno;
 
+	write_count++;
+	printf("Write count unlink: %d\n", write_count);
+
 	return 0;
 }
 
@@ -286,6 +296,9 @@ static int xmp_rmdir(const char *path)
 	free(new_path);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count rmdir: %d\n", write_count);
 
 	return 0;
 }
@@ -300,6 +313,9 @@ static int xmp_symlink(const char *from, const char *to)
 	free(new_to);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count symlink: %d\n", write_count);
 
 	return 0;
 }
@@ -320,6 +336,9 @@ static int xmp_rename(const char *from, const char *to, unsigned int flags)
 	if (res == -1)
 		return -errno;
 
+	write_count++;
+	printf("Write count rename: %d\n", write_count);
+
 	return 0;
 }
 
@@ -334,6 +353,9 @@ static int xmp_link(const char *from, const char *to)
 	free(new_to);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count link: %d\n", write_count);
 
 	return 0;
 }
@@ -353,6 +375,9 @@ static int xmp_chmod(const char *path, mode_t mode,
 	if (res == -1)
 		return -errno;
 
+	write_count++;
+	printf("Write count chmod: %d\n", write_count);
+
 	return 0;
 }
 
@@ -370,6 +395,9 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid,
 	}
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count chown: %d\n", write_count);
 
 	return 0;
 }
@@ -389,6 +417,9 @@ static int xmp_truncate(const char *path, off_t size,
 
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count truncate: %d\n", write_count);
 
 	return 0;
 }
@@ -410,6 +441,9 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 	if (res == -1)
 		return -errno;
 
+	write_count++;
+	printf("Write count utimens: %d\n", write_count);
+
 	return 0;
 }
 #endif
@@ -423,6 +457,9 @@ static int xmp_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 	free(new_path);
 	if (fd == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count create: %d\n", write_count);
 
 	fi->fh = fd;
 	return 0;
@@ -487,6 +524,9 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 	if (res == -1)
 		res = -errno;
 
+	write_count++;
+	printf("Write count write: %d\n", write_count);
+
 	return res;
 }
 
@@ -500,6 +540,9 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 	dst.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
 	dst.buf[0].fd = fi->fh;
 	dst.buf[0].pos = offset;
+
+	write_count++;
+	printf("Write count write_buf: %d\n", write_count);
 
 	return fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
 }
@@ -585,6 +628,10 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 	free(new_path);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count setxattr: %d\n", write_count);
+
 	return 0;
 }
 
@@ -616,6 +663,10 @@ static int xmp_removexattr(const char *path, const char *name)
 	free(new_path);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count removexattr: %d\n", write_count);
+
 	return 0;
 }
 #endif /* HAVE_SETXATTR */
@@ -625,6 +676,9 @@ static int xmp_lock(const char *path, struct fuse_file_info *fi, int cmd,
 		    struct flock *lock)
 {
 	(void) path;
+
+	write_count++;
+	printf("Write count lock: %d\n", write_count);
 
 	return ulockmgr_op(fi->fh, cmd, lock, &fi->lock_owner,
 			   sizeof(fi->lock_owner));
@@ -639,6 +693,9 @@ static int xmp_flock(const char *path, struct fuse_file_info *fi, int op)
 	res = flock(fi->fh, op);
 	if (res == -1)
 		return -errno;
+	
+	write_count++;
+	printf("Write count flock: %d\n", write_count);
 
 	return 0;
 }
@@ -658,6 +715,9 @@ static ssize_t xmp_copy_file_range(const char *path_in,
 			      flags);
 	if (res == -1)
 		return -errno;
+
+	write_count++;
+	printf("Write count copy_file_range: %d\n", write_count);
 
 	return res;
 }
