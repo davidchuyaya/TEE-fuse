@@ -68,6 +68,7 @@ struct _uintptr_to_must_hold_fuse_ino_t_dummy_struct \
 			((sizeof(fuse_ino_t) >= sizeof(uintptr_t)) ? 1 : -1); };
 #endif
 
+// David: exists for each file/dir after do_lookup. Pointer will be given as a parameter to each method
 struct lo_inode {
 	struct lo_inode *next; /* protected by lo->mutex */
 	struct lo_inode *prev; /* protected by lo->mutex */
@@ -83,6 +84,7 @@ enum {
 	CACHE_ALWAYS,
 };
 
+// David: only 1 lo_data instance exists, holding the pointer to root
 struct lo_data {
 	pthread_mutex_t mutex;
 	int debug;
@@ -142,11 +144,13 @@ static void passthrough_ll_help(void)
 "    -o cache=always        Cache always\n");
 }
 
+// David: get info about the file system config or root inode
 static struct lo_data *lo_data(fuse_req_t req)
 {
 	return (struct lo_data *) fuse_req_userdata(req);
 }
 
+// David: either get the root inode or convert FUSE's inode pointer to the custom inode struct
 static struct lo_inode *lo_inode(fuse_req_t req, fuse_ino_t ino)
 {
 	if (ino == FUSE_ROOT_ID)
@@ -155,6 +159,7 @@ static struct lo_inode *lo_inode(fuse_req_t req, fuse_ino_t ino)
 		return (struct lo_inode *) (uintptr_t) ino;
 }
 
+// David: get the fd for the inode
 static int lo_fd(fuse_req_t req, fuse_ino_t ino)
 {
 	return lo_inode(req, ino)->fd;
@@ -165,6 +170,7 @@ static bool lo_debug(fuse_req_t req)
 	return lo_data(req)->debug != 0;
 }
 
+// David: retrieve options provided in fuse_session_new (see main)
 static void lo_init(void *userdata,
 		    struct fuse_conn_info *conn)
 {
@@ -186,6 +192,7 @@ static void lo_init(void *userdata,
 	}
 }
 
+// David: free all custom inode structs (not sure why userdata doesn't need to be freed)
 static void lo_destroy(void *userdata)
 {
 	struct lo_data *lo = (struct lo_data*) userdata;
@@ -197,6 +204,7 @@ static void lo_destroy(void *userdata)
 	}
 }
 
+// David: Type = read
 static void lo_getattr(fuse_req_t req, fuse_ino_t ino,
 			     struct fuse_file_info *fi)
 {
@@ -213,6 +221,7 @@ static void lo_getattr(fuse_req_t req, fuse_ino_t ino,
 	fuse_reply_attr(req, &buf, lo->timeout);
 }
 
+// David: Type = write
 static void lo_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		       int valid, struct fuse_file_info *fi)
 {
@@ -222,16 +231,19 @@ static void lo_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 	int ifd = inode->fd;
 	int res;
 
+	// David: Change permissions
 	if (valid & FUSE_SET_ATTR_MODE) {
 		if (fi) {
 			res = fchmod(fi->fh, attr->st_mode);
 		} else {
+			// David: If the file has not been opened by the client, assume it has been opened by fuse and get the fd. Not sure why it doesn't just use fchmod(ifd, ...) though.
 			sprintf(procname, "/proc/self/fd/%i", ifd);
 			res = chmod(procname, attr->st_mode);
 		}
 		if (res == -1)
 			goto out_err;
 	}
+	// David: Set uid and gid
 	if (valid & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
 		uid_t uid = (valid & FUSE_SET_ATTR_UID) ?
 			attr->st_uid : (uid_t) -1;
@@ -243,6 +255,7 @@ static void lo_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (res == -1)
 			goto out_err;
 	}
+	// David: Truncate
 	if (valid & FUSE_SET_ATTR_SIZE) {
 		if (fi) {
 			res = ftruncate(fi->fh, attr->st_size);
@@ -253,6 +266,7 @@ static void lo_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 		if (res == -1)
 			goto out_err;
 	}
+	// David: Change last accessed and modified times
 	if (valid & (FUSE_SET_ATTR_ATIME | FUSE_SET_ATTR_MTIME)) {
 		struct timespec tv[2];
 
@@ -288,6 +302,7 @@ out_err:
 	fuse_reply_err(req, saverr);
 }
 
+// David: Find the custom inode struct for the given inode number and increments the reference count. Linearly searches a linked list, but should be fine(?) because new inodes are created at the front of the list (after root)
 static struct lo_inode *lo_find(struct lo_data *lo, struct stat *st)
 {
 	struct lo_inode *p;
@@ -306,6 +321,8 @@ static struct lo_inode *lo_find(struct lo_data *lo, struct stat *st)
 	return ret;
 }
 
+// David: Open the file with the given name, finds and returns its custom inode. A new custom inode is created if one does not exist.
+// David: Type = write (opens file, creates inode, increments refcount)
 static int lo_do_lookup(fuse_req_t req, fuse_ino_t parent, const char *name,
 			 struct fuse_entry_param *e)
 {
@@ -319,14 +336,17 @@ static int lo_do_lookup(fuse_req_t req, fuse_ino_t parent, const char *name,
 	e->attr_timeout = lo->timeout;
 	e->entry_timeout = lo->timeout;
 
+	// David: Open the file, get its fd
 	newfd = openat(lo_fd(req, parent), name, O_PATH | O_NOFOLLOW);
 	if (newfd == -1)
 		goto out_err;
 
+	// David: Check if we can get info about the file? Not sure why this is needed
 	res = fstatat(newfd, "", &e->attr, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
 	if (res == -1)
 		goto out_err;
 
+	// David: Either retrieve its custom inode or create a new one and add it to the root's linked list
 	inode = lo_find(lo_data(req), &e->attr);
 	if (inode) {
 		close(newfd);
@@ -368,6 +388,7 @@ out_err:
 	return saverr;
 }
 
+// Type: write (uses lo_do_lookup)
 static void lo_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 {
 	struct fuse_entry_param e;
@@ -384,6 +405,7 @@ static void lo_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 		fuse_reply_entry(req, &e);
 }
 
+// Type: write (uses lo_do_lookup)
 static void lo_mknod_symlink(fuse_req_t req, fuse_ino_t parent,
 			     const char *name, mode_t mode, dev_t rdev,
 			     const char *link)
@@ -393,12 +415,14 @@ static void lo_mknod_symlink(fuse_req_t req, fuse_ino_t parent,
 	struct lo_inode *dir = lo_inode(req, parent);
 	struct fuse_entry_param e;
 
+	// David: Create the node
 	res = mknod_wrapper(dir->fd, name, link, mode, rdev);
 
 	saverr = errno;
 	if (res == -1)
 		goto out;
 
+	// David: Open it (get the fd), create its custom inode
 	saverr = lo_do_lookup(req, parent, name, &e);
 	if (saverr)
 		goto out;
@@ -414,24 +438,28 @@ out:
 	fuse_reply_err(req, saverr);
 }
 
+// Type: write (uses lo_mknod_symlink)
 static void lo_mknod(fuse_req_t req, fuse_ino_t parent,
 		     const char *name, mode_t mode, dev_t rdev)
 {
 	lo_mknod_symlink(req, parent, name, mode, rdev, NULL);
 }
 
+// Type: write (uses lo_mknod_symlink)
 static void lo_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
 		     mode_t mode)
 {
 	lo_mknod_symlink(req, parent, name, S_IFDIR | mode, 0, NULL);
 }
 
+// Type: write (uses lo_mknod_symlink)
 static void lo_symlink(fuse_req_t req, const char *link,
 		       fuse_ino_t parent, const char *name)
 {
 	lo_mknod_symlink(req, parent, name, S_IFLNK, 0, link);
 }
 
+// Type: write (increments inode refcount)
 static void lo_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 		    const char *name)
 {
@@ -446,16 +474,19 @@ static void lo_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
 	e.attr_timeout = lo->timeout;
 	e.entry_timeout = lo->timeout;
 
+	// David: link
 	sprintf(procname, "/proc/self/fd/%i", inode->fd);
 	res = linkat(AT_FDCWD, procname, lo_fd(req, parent), name,
 		     AT_SYMLINK_FOLLOW);
 	if (res == -1)
 		goto out_err;
 
+	// David: Check if we can still open the file
 	res = fstatat(inode->fd, "", &e.attr, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
 	if (res == -1)
 		goto out_err;
 
+	// David: Increase inode reference count, then point to this inode
 	pthread_mutex_lock(&lo->mutex);
 	inode->refcount++;
 	pthread_mutex_unlock(&lo->mutex);
@@ -474,6 +505,7 @@ out_err:
 	fuse_reply_err(req, saverr);
 }
 
+// Type: write
 static void lo_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name)
 {
 	int res;
@@ -483,6 +515,7 @@ static void lo_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name)
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: write
 static void lo_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 		      fuse_ino_t newparent, const char *newname,
 		      unsigned int flags)
@@ -500,6 +533,7 @@ static void lo_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: write
 static void lo_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
 {
 	int res;
@@ -509,6 +543,8 @@ static void lo_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// David: decrease inode count by n, closing the fd and freeing the custom struct if new count == 0
+// Type: write (reduces inode refcount)
 static void unref_inode(struct lo_data *lo, struct lo_inode *inode, uint64_t n)
 {
 	if (!inode)
@@ -534,6 +570,7 @@ static void unref_inode(struct lo_data *lo, struct lo_inode *inode, uint64_t n)
 	}
 }
 
+// Type: write (uses unref_inode)
 static void lo_forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
 {
 	struct lo_data *lo = lo_data(req);
@@ -549,12 +586,14 @@ static void lo_forget_one(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
 	unref_inode(lo, inode, nlookup);
 }
 
+// Type: write (uses lo_forget_one)
 static void lo_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
 {
 	lo_forget_one(req, ino, nlookup);
 	fuse_reply_none(req);
 }
 
+// Type: write (uses lo_forget_one)
 static void lo_forget_multi(fuse_req_t req, size_t count,
 				struct fuse_forget_data *forgets)
 {
@@ -565,6 +604,8 @@ static void lo_forget_multi(fuse_req_t req, size_t count,
 	fuse_reply_none(req);
 }
 
+// David: read symbolic link and end the string with a null char
+// Type: read
 static void lo_readlink(fuse_req_t req, fuse_ino_t ino)
 {
 	char buf[PATH_MAX + 1];
@@ -588,11 +629,13 @@ struct lo_dirp {
 	off_t offset;
 };
 
+// David: interpret file descriptors for directories as pointers to a custom directory struct
 static struct lo_dirp *lo_dirp(struct fuse_file_info *fi)
 {
 	return (struct lo_dirp *) (uintptr_t) fi->fh;
 }
 
+// Type: write (opens directory, creates custom directory instance)
 static void lo_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
 	int error = ENOMEM;
@@ -604,10 +647,12 @@ static void lo_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
 	if (d == NULL)
 		goto out_err;
 
+	// David: get fd of directory
 	fd = openat(lo_fd(req, ino), ".", O_RDONLY);
 	if (fd == -1)
 		goto out_errno;
 
+	// David: turn directory fd into a DIR object and store inside d
 	d->dp = fdopendir(fd);
 	if (d->dp == NULL)
 		goto out_errno;
@@ -615,6 +660,7 @@ static void lo_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
 	d->offset = 0;
 	d->entry = NULL;
 
+	// David: set file descriptor as the directory object d
 	fi->fh = (uintptr_t) d;
 	if (lo->cache == CACHE_ALWAYS)
 		fi->cache_readdir = 1;
@@ -638,6 +684,8 @@ static int is_dot_or_dotdot(const char *name)
 				  (name[1] == '.' && name[2] == '\0'));
 }
 
+// David: return all contents in a directory (like calling ls). Plus = 0 if lookup count of directory entries should not increase, 1 if they should.
+// Type: read (although it increments dir entry, dir offset, and inode ref counts, this info is lost on restart)
 static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 			  off_t offset, struct fuse_file_info *fi, int plus)
 {
@@ -656,6 +704,7 @@ static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 	}
 	p = buf;
 
+	// David: start reading the directory from the offset file
 	if (offset != d->offset) {
 		seekdir(d->dp, offset);
 		d->entry = NULL;
@@ -666,6 +715,7 @@ static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 		off_t nextoff;
 		const char *name;
 
+		// David: if the directory doesn't have info about its first file, try to find it with readdir
 		if (!d->entry) {
 			errno = 0;
 			d->entry = readdir(d->dp);
@@ -683,12 +733,14 @@ static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 		fuse_ino_t entry_ino = 0;
 		if (plus) {
 			struct fuse_entry_param e;
+			// David: only call do_lookup on actual directory entries, not . or ..
 			if (is_dot_or_dotdot(name)) {
 				e = (struct fuse_entry_param) {
 					.attr.st_ino = d->entry->d_ino,
 					.attr.st_mode = d->entry->d_type << 12,
 				};
 			} else {
+				// David: do_lookup calls lo_find which increments refcount
 				err = lo_do_lookup(req, ino, name, &e);
 				if (err)
 					goto error;
@@ -698,6 +750,7 @@ static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 			entsize = fuse_add_direntry_plus(req, p, rem, name,
 							 &e, nextoff);
 		} else {
+			// David: plus is false, don't call do_lookup
 			struct stat st = {
 				.st_ino = d->entry->d_ino,
 				.st_mode = d->entry->d_type << 12,
@@ -705,6 +758,7 @@ static void lo_do_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 			entsize = fuse_add_direntry(req, p, rem, name,
 						    &st, nextoff);
 		}
+		// David: stop if we're out of memory for the response
 		if (entsize > rem) {
 			if (entry_ino != 0) 
 				lo_forget_one(req, entry_ino, 1);
@@ -731,18 +785,21 @@ error:
     free(buf);
 }
 
+// Type: read
 static void lo_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 		       off_t offset, struct fuse_file_info *fi)
 {
 	lo_do_readdir(req, ino, size, offset, fi, 0);
 }
 
+// Type: read
 static void lo_readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
 			   off_t offset, struct fuse_file_info *fi)
 {
 	lo_do_readdir(req, ino, size, offset, fi, 1);
 }
 
+// Type: write
 static void lo_releasedir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
 	struct lo_dirp *d = lo_dirp(fi);
@@ -752,6 +809,7 @@ static void lo_releasedir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info 
 	fuse_reply_err(req, 0);
 }
 
+// Type: write
 static void lo_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		      mode_t mode, struct fuse_file_info *fi)
 {
@@ -764,17 +822,20 @@ static void lo_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_log(FUSE_LOG_DEBUG, "lo_create(parent=%" PRIu64 ", name=%s)\n",
 			parent, name);
 
+	// David: create the file with O_CREAT
 	fd = openat(lo_fd(req, parent), name,
 		    (fi->flags | O_CREAT) & ~O_NOFOLLOW, mode);
 	if (fd == -1)
 		return (void) fuse_reply_err(req, errno);
 
+	// David: store the fd
 	fi->fh = fd;
 	if (lo->cache == CACHE_NEVER)
 		fi->direct_io = 1;
 	else if (lo->cache == CACHE_ALWAYS)
 		fi->keep_cache = 1;
 
+	// David: create the inode through do_lookup
 	err = lo_do_lookup(req, parent, name, &e);
 	if (err)
 		fuse_reply_err(req, err);
@@ -782,6 +843,7 @@ static void lo_create(fuse_req_t req, fuse_ino_t parent, const char *name,
 		fuse_reply_create(req, &e, fi);
 }
 
+// Type: fsync
 static void lo_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 			struct fuse_file_info *fi)
 {
@@ -795,6 +857,7 @@ static void lo_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: write
 static void lo_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
 	int fd;
@@ -821,6 +884,7 @@ static void lo_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 	if (lo->writeback && (fi->flags & O_APPEND))
 		fi->flags &= ~O_APPEND;
 
+	// David: use inode fd to create a file name, then open that and retrieve another fd?
 	sprintf(buf, "/proc/self/fd/%i", lo_fd(req, ino));
 	fd = open(buf, fi->flags & ~O_NOFOLLOW);
 	if (fd == -1)
@@ -834,6 +898,7 @@ static void lo_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 	fuse_reply_open(req, fi);
 }
 
+// Type: write
 static void lo_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
 	(void) ino;
@@ -842,6 +907,7 @@ static void lo_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi
 	fuse_reply_err(req, 0);
 }
 
+// Type: read (doesn't prompt remote to do anything)
 static void lo_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 {
 	int res;
@@ -850,6 +916,7 @@ static void lo_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: fsync
 static void lo_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
 		     struct fuse_file_info *fi)
 {
@@ -862,6 +929,7 @@ static void lo_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: read
 static void lo_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 		    off_t offset, struct fuse_file_info *fi)
 {
@@ -878,6 +946,7 @@ static void lo_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 	fuse_reply_data(req, &buf, FUSE_BUF_SPLICE_MOVE);
 }
 
+// Type: write
 static void lo_write_buf(fuse_req_t req, fuse_ino_t ino,
 			 struct fuse_bufvec *in_buf, off_t off,
 			 struct fuse_file_info *fi)
@@ -901,6 +970,7 @@ static void lo_write_buf(fuse_req_t req, fuse_ino_t ino,
 		fuse_reply_write(req, (size_t) res);
 }
 
+// Type: read
 static void lo_statfs(fuse_req_t req, fuse_ino_t ino)
 {
 	int res;
@@ -913,6 +983,7 @@ static void lo_statfs(fuse_req_t req, fuse_ino_t ino)
 		fuse_reply_statfs(req, &stbuf);
 }
 
+// Type: write
 static void lo_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 			 off_t offset, off_t length, struct fuse_file_info *fi)
 {
@@ -936,6 +1007,7 @@ static void lo_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 	fuse_reply_err(req, err);
 }
 
+// Type: read (locks are not persisted after restart so we don't care)
 static void lo_flock(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi,
 		     int op)
 {
@@ -947,6 +1019,7 @@ static void lo_flock(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi,
 	fuse_reply_err(req, res == -1 ? errno : 0);
 }
 
+// Type: read
 static void lo_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 			size_t size)
 {
@@ -967,6 +1040,7 @@ static void lo_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 
 	sprintf(procname, "/proc/self/fd/%i", inode->fd);
 
+	// David: non-zero size = reply with fuse_reply_buf
 	if (size) {
 		value = malloc(size);
 		if (!value)
@@ -998,6 +1072,7 @@ out:
 	goto out_free;
 }
 
+// Type: read
 static void lo_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size)
 {
 	char *value = NULL;
@@ -1017,6 +1092,7 @@ static void lo_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size)
 
 	sprintf(procname, "/proc/self/fd/%i", inode->fd);
 
+	// David: non-zero size = reply with fuse_reply_buf
 	if (size) {
 		value = malloc(size);
 		if (!value)
@@ -1048,6 +1124,7 @@ out:
 	goto out_free;
 }
 
+// Type: write
 static void lo_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 			const char *value, size_t size, int flags)
 {
@@ -1074,6 +1151,7 @@ out:
 	fuse_reply_err(req, saverr);
 }
 
+// Type: write
 static void lo_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name)
 {
 	char procname[64];
@@ -1099,6 +1177,7 @@ out:
 	fuse_reply_err(req, saverr);
 }
 
+// Type: write
 #ifdef HAVE_COPY_FILE_RANGE
 static void lo_copy_file_range(fuse_req_t req, fuse_ino_t ino_in, off_t off_in,
 			       struct fuse_file_info *fi_in,
@@ -1124,6 +1203,7 @@ static void lo_copy_file_range(fuse_req_t req, fuse_ino_t ino_in, off_t off_in,
 }
 #endif
 
+// Type: write (changes file offset)
 static void lo_lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
 		     struct fuse_file_info *fi)
 {
